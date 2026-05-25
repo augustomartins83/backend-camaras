@@ -1,9 +1,30 @@
 // Backend serverless — Vercel
-// Usa module.exports (CommonJS) para compatibilidade total com Vercel
+// Usa https nativo (funciona em qualquer versão do Node.js)
+
+const https = require("https");
+
+function httpsPost(url, data, headers) {
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify(data);
+    const urlObj = new URL(url);
+    const options = {
+      hostname: urlObj.hostname,
+      path: urlObj.pathname,
+      method: "POST",
+      headers: { ...headers, "Content-Length": Buffer.byteLength(body) }
+    };
+    const req = https.request(options, (res) => {
+      let raw = "";
+      res.on("data", chunk => raw += chunk);
+      res.on("end", () => resolve({ status: res.statusCode, body: raw }));
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
 
 module.exports = async function handler(req, res) {
-
-  // CORS — permite chamadas do GitHub Pages
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
@@ -13,17 +34,12 @@ module.exports = async function handler(req, res) {
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ erro: "Variável ANTHROPIC_API_KEY não configurada no Vercel." });
+    return res.status(500).json({ erro: "ANTHROPIC_API_KEY não configurada no Vercel." });
   }
 
   const { tema, cidades } = req.body || {};
-
-  if (!tema || !tema.trim()) {
-    return res.status(400).json({ erro: "Informe um tema para buscar." });
-  }
-  if (!Array.isArray(cidades) || cidades.length === 0) {
-    return res.status(400).json({ erro: "Selecione pelo menos uma cidade." });
-  }
+  if (!tema || !tema.trim()) return res.status(400).json({ erro: "Informe um tema." });
+  if (!Array.isArray(cidades) || cidades.length === 0) return res.status(400).json({ erro: "Selecione pelo menos uma cidade." });
 
   const listaCidades = cidades.map(c => `${c.cidade}/${c.uf}`).join(", ");
 
@@ -36,48 +52,39 @@ Para cada projeto/lei que encontrar, traga:
 - resumo: um resumo de 1-2 frases sobre o que trata
 - link: a URL da fonte onde você encontrou (link real)
 
-Busque resultados reais e verificáveis. Não invente projetos. Se não encontrar nada para uma cidade, simplesmente não a inclua.
-
-Responda APENAS com um array JSON válido, sem nenhum texto antes ou depois, sem markdown, neste formato exato:
+Busque resultados reais e verificáveis. Não invente projetos.
+Responda APENAS com um array JSON válido, sem markdown:
 [{"titulo":"...","cidade":"...","numero":"...","resumo":"...","link":"..."}]
-
-Se não encontrar nenhum resultado, responda: []`;
+Se não encontrar nada, responda: []`;
 
   try {
-    const apiResp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
+    const apiResult = await httpsPost(
+      "https://api.anthropic.com/v1/messages",
+      {
         model: "claude-sonnet-4-6",
         max_tokens: 4096,
         messages: [{ role: "user", content: prompt }],
-        tools: [{
-          type: "web_search_20250305",
-          name: "web_search",
-          max_uses: 8,
-        }],
-      }),
-    });
+        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 8 }]
+      },
+      {
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json"
+      }
+    );
 
-    if (!apiResp.ok) {
-      const detalhe = await apiResp.text();
-      return res.status(apiResp.status).json({
-        erro: `Erro da API Anthropic (${apiResp.status})`,
-        detalhe,
+    if (apiResult.status !== 200) {
+      return res.status(apiResult.status).json({
+        erro: `Erro da API Anthropic (${apiResult.status})`,
+        detalhe: apiResult.body
       });
     }
 
-    const data = await apiResp.json();
-
+    const data = JSON.parse(apiResult.body);
     const textoFinal = (data.content || [])
       .filter(b => b.type === "text")
       .map(b => b.text)
-      .join("\n")
-      .trim();
+      .join("\n").trim();
 
     let resultados = [];
     try {
@@ -88,11 +95,7 @@ Se não encontrar nenhum resultado, responda: []`;
         resultados = JSON.parse(limpo.slice(inicio, fim + 1));
       }
     } catch (e) {
-      return res.status(200).json({
-        resultados: [],
-        aviso: "Não foi possível estruturar os resultados.",
-        textoBruto: textoFinal,
-      });
+      return res.status(200).json({ resultados: [], aviso: "Não foi possível estruturar os resultados.", textoBruto: textoFinal });
     }
 
     return res.status(200).json({ resultados, tema, totalCidades: cidades.length });
